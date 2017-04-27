@@ -1,0 +1,129 @@
+·启动后，首先运行的ROM BIOS，根据Exercise2的要求，对一部分的指令的解释我放在了下面。
+在BIOS做完一些初始化工作后，它需要在找到bootloader的代码，然后将这段代码读入内存，并将控制权转交给Bootloader。
+Bootloader工作的具体内容的分析也在下面。
+BootLoader在将内核都读取到内存中后，就将控制权给了内核。
+
+遇到的问题包括：
+1.汇编代码很多都忘了，通过复习CSAPP回忆起来
+2.关于BIOS和BootLoader的分工，我现在的理解就如上面所写
+3.一些端口和寄存器不知道是干嘛的，这些都通过搜索引擎解决了
+4.关于C的指针的问题，复习了The C Programming Language。
+
+-------------------------------------------------------------------------
+
+·根据Exercise2的要求，使用gdb查看每一指令
+
+[f000:fff0]    0xffff0:	ljmp   $0xf000,$0xe05b
+这是启动后BIOS执行的第一条指令，会跳转到0xfe05b地址处。而这个地址是根据0xf000<<4+0xe05b计算出的。原因是启动的时候是
+处于实模式下，实模式被特殊定义为20位地址内存可访问空间上，8086有20根地址线，所以它们只能访问1MB的内存空间。但是寄存
+器为16位的，所以由16位的段地址和16位的段内偏移地址组成了实际的物理地址。
+
+[f000:e05b]    0xfe05b:	jmp    0xfc85e
+不知道为什么这里直接就跳转了
+
+[f000:c85e]    0xfc85e:	mov    %cr0,%eax
+[f000:c861]    0xfc861:	and    $0x9fffffff,%eax
+[f000:c867]    0xfc867:	mov    %eax,%cr0
+cr0寄存器是控制寄存器，上述三个语句的作用是将cr0的29位和30位设为0。29位为NW(Not Writethough)，设为0表示Writethough即
+写操作根本不使用缓存，数据总是直接写入磁盘。30位为CD(Cache Disabled)，设为0表示使用缓存。所以这里三条指令的意思应该是
+表示读有缓存，而写不用缓存
+
+[f000:c86a]    0xfc86a:	cli
+这是关闭中断指令，防止当前代码执行被CPU交换出去
+
+[f000:c86b]    0xfc86b:	cld
+设置方向标识位为0，表示后续的串操作如MOV操作，内存地址的变化方向，如果为0代表从低地址值变为高地址
+
+[f000:c86c]    0xfc86c:	mov    $0x8f,%eax
+[f000:c872]    0xfc872:	out    %al,$0x70
+[f000:c874]    0xfc874:	in     $0x71,%al
+in和out用于操作io端口，0x70端口和0x71端口是用于控制系统中CMOS设备，它可以用于在计算机关闭时存储一些信息。还可包括
+时钟设备（Real Time Clock） ，还可以控制是否响应不可屏蔽中断NMI(Non-Maskable Interrupt)。操作CMOS存储器中的内容需要两个
+端口，一个是0x70另一个就是0x71。其中0x70可以叫做索引寄存器，这个8位寄存器的最高位是不可屏蔽中断(NMI)使能位。如果把这个位
+置1，则NMI不会被响应。低7位用于指定CMOS存储器中的存储单元地址。这里即表示禁用NMI，并且使用第1-7号储存单元，并将值读取出来。
+参考http://bochs.sourceforge.net/techspec/PORTS.LST
+
+[f000:c876]    0xfc876:	cmp    $0x0,%al
+[f000:c878]    0xfc878:	jne    0xfc88d
+这里将之前读取到al中的值与0比较，并在不等的时候跳转。这里并没有跳转
+
+[f000:c87a]    0xfc87a:	xor    %ax,%ax
+[f000:c87c]    0xfc87c:	mov    %ax,%ss
+[f000:c87e]    0xfc87e:	mov    $0x7000,%esp
+[f000:c884]    0xfc884:	mov    $0xf4b2c,%edx
+[f000:c88a]    0xfc88a:	jmp    0xfc719
+[f000:c719]    0xfc719:	mov    %eax,%ecx
+这是一串赋值操作，不太明白干了什么
+
+[f000:c71c]    0xfc71c:	cli
+[f000:c71d]    0xfc71d:	cld
+这里同上的解释
+
+[f000:c71e]    0xfc71e:	mov    $0x8f,%eax
+[f000:c724]    0xfc724:	out    %al,$0x70
+[f000:c726]    0xfc726:	in     $0x71,%al
+[f000:c728]    0xfc728:	in     $0x92,%al
+[f000:c72a]    0xfc72a:	or     $0x2,%al
+[f000:c72c]    0xfc72c:	out    %al,$0x92
+这里又操作了一次0x70端口，不知道为什么还需要一次，可能与前面两条指令有关。接下来是操作0x92端口，这个端口控制
+的是 PS/2系统控制端口A，这里是将bit1置一，bit 1= 1 indicates A20 active，所以这里是打开了A20门，为进入保护模式
+做好准备
+
+[f000:c72e]    0xfc72e:	lidtw  %cs:-0x31cc
+加载中断向量表寄存器IDTR
+
+[f000:c734]    0xfc734:	lgdtw  %cs:-0x3188
+加载全局描述符表格寄存器GDTR，这里在后面切换为保护模式的时候很关键
+
+[f000:c73a]    0xfc73a:	mov    %cr0,%eax
+[f000:c73d]    0xfc73d:	or     $0x1,%eax
+[f000:c741]    0xfc741:	mov    %eax,%cr0
+这里将cr0的第0位设置为1。第0位是PE位，启动保护位，当该位被置1，代表开启了保护模式
+
+[f000:c744]    0xfc744:	ljmpl  $0x8,$0xfc74c
+这里是转为了保护模式
+
+0xfc74c:	mov    $0x10,%eax
+0xfc751:	mov    %eax,%ds
+0xfc753:	mov    %eax,%es
+0xfc755:	mov    %eax,%ss
+0xfc757:	mov    %eax,%fs
+0xfc759:	mov    %eax,%gs
+0xfc75b:	mov    %ecx,%eax
+这里初始化段处理器
+
+0xfc75d:	jmp    *%edx
+0xf4b2c:	push   %edi
+0xf4b2d:	push   %esi
+0xf4b2e:	sub    $0x4,%esp
+0xf4b31:	xor    %edx,%edx
+0xf4b33:	mov    %dl,%al
+0xf4b35:	out    %al,$0xd
+0xf4b37:	out    %al,$0xda
+0xf4b39:	mov    $0xc0,%al
+0xf4b3b:	out    %al,$0xd6
+0xf4b3d:	mov    %dl,%al
+0xf4b3f:	out    %al,$0xd4
+0xf4b41:	push   $0xf5ebc
+0xf4b46:	push   $0xf5639
+0xf4b4b:	call   0xf3350l
+开始调用函数,不知道在干嘛了。。
+
+-------------------------------------------------------------------------
+
+·Exercise 3 BootLoader
+这部分通过阅读boot.S文件可以了解到BootLoader进行了下列一些操作。主要是完成到保护模式的切换
+boot.S文件的15行关闭了中断，放置被交换出。16行设置了串指令内存增长的方向
+19--22行在于置零段处理器，因为前面BIOS可能会用到了这些段处理器
+29--42行是开启A20门，为转为保护模式做准备
+48--51行是在加载全局描述符表格寄存器GDTR和将cr0的第0位置一，这代表开启保护模式
+而55行的跳转正式完成了切换。这条指令后的指令都将在保护模式下完成
+接着就进入了bootmain函数
+bootmain函数首先调用的是readseg函数，这里是将内核的第一页读取到内存中，即吧elf头读了出来
+然后对elf头进行验证，若验证通过就通过elf头中的Program Header Table，依次将内核的各个段读入内存
+读取完毕后BootLoader就将控制权转交给了内核。
+
+
+
+
+
